@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: be
+  labels: { app: mern, tier: backend }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: mern, tier: backend }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app: mern, tier: backend }
+    spec:
+      containers:
+        - name: backend
+          # CHANGE THIS IMAGE
+          image: munitkumar/csbackend:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 3000, name: http }]
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "3000"
+            
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "500m", memory: "512Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: be
+  labels: { app: mern, tier: backend }
+spec:
+  type: ClusterIP
+  selector: { app: mern, tier: backend }
+  ports:
+    - name: http
+      port: 3000
+      targetPort: http

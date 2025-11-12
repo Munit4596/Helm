@@ -1,0 +1,43 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}
+  annotations:
+    kubernetes.io/ingress.class: {{ .Values.ingress.className | default "nginx" }}
+spec:
+  {{- if .Values.ingress.host }}
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          - path: /(api/.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-be
+                port: { number: {{ .Values.backend.service.port }} }
+          - path: /(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-fe
+                port: { number: {{ .Values.frontend.service.port }} }
+  {{- else }}
+  rules:
+    - http:
+        paths:
+          - path: /(api/.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-be
+                port: { number: {{ .Values.backend.service.port }} }
+          - path: /(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-fe
+                port: { number: {{ .Values.frontend.service.port }} }
+  {{- end }}
+{{- end }}

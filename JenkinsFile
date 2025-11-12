@@ -1,0 +1,151 @@
+pipeline {
+  agent any
+  options { timestamps(); disableConcurrentBuilds() }
+
+  parameters {
+    // If using Docker Hub, set to docker.io/<user>.
+    // If using ECR, this is ignored when USE_ECR=true.
+    string(name: 'REGISTRY', defaultValue: 'docker.io/munitkumar', description: 'Docker registry base')
+    string(name: 'RELEASE_NAME', defaultValue: 'mern', description: 'Helm release name')
+    string(name: 'NAMESPACE', defaultValue: 'mern', description: 'Kubernetes namespace')
+    booleanParam(name: 'USE_ECR', defaultValue: false, description: 'Push to AWS ECR instead of Docker Hub')
+    booleanParam(name: 'CREATE_SECRET', defaultValue: false, description: 'Create/Update mern-secrets from Jenkins credential MONGO_URI')
+  }
+
+  environment {
+    CHART_DIR     = 'charts/mern'
+    FRONTEND_IMG  = 'mern-frontend'
+    BACKEND_IMG   = 'mern-backend'
+    AWS_REGION    = 'ca-central-1'       // change if needed
+  }
+
+  stages {
+    stage('Checkout & Tag') {
+      steps {
+        checkout scm
+        script {
+          env.SHA = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          echo "Image tag (git SHA): ${env.SHA}"
+        }
+      }
+    }
+
+    stage('Docker Login') {
+      steps {
+        script {
+          if (params.USE_ECR) {
+            withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'AWS_CREDS']]) {
+              sh '''
+                set -e
+                ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                aws ecr get-login-password --region ${AWS_REGION} \
+                  | docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                echo -n ${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com > .reg
+              '''
+            }
+          } else {
+            withCredentials([usernamePassword(credentialsId: 'DOCKER_CREDS', usernameVariable: 'USR', passwordVariable: 'PWD')]) {
+              sh 'echo "$PWD" | docker login -u "$USR" --password-stdin'
+            }
+            sh "echo -n '${params.REGISTRY}' > .reg"
+          }
+          env.REG = sh(script: 'cat .reg', returnStdout: true).trim()
+          echo "Using registry: ${env.REG}"
+        }
+      }
+    }
+
+    stage('Ensure ECR repos (only when USE_ECR)') {
+      when { expression { return params.USE_ECR } }
+      steps {
+        sh '''
+          set -e
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          for r in "${FRONTEND_IMG}" "${BACKEND_IMG}"; do
+            aws ecr describe-repositories --repository-names "$r" >/dev/null 2>&1 || \
+            aws ecr create-repository --repository-name "$r" \
+              --image-scanning-configuration scanOnPush=true \
+              --encryption-configuration encryptionType=AES256
+          done
+        '''
+      }
+    }
+
+    stage('Build Images') {
+      steps {
+        sh '''
+          set -e
+          echo "Building ${FRONTEND_IMG}:${SHA}"
+          docker build -t ${FRONTEND_IMG}:${SHA} -f frontend/Dockerfile frontend
+
+          echo "Building ${BACKEND_IMG}:${SHA}"
+          docker build -t ${BACKEND_IMG}:${SHA}  -f backend/Dockerfile  backend
+        '''
+      }
+    }
+
+    stage('Tag & Push') {
+      steps {
+        sh '''
+          set -e
+          REG="$(cat .reg)"
+          for r in "${FRONTEND_IMG}" "${BACKEND_IMG}"; do
+            docker tag ${r}:${SHA} ${REG}/${r}:${SHA}
+            docker tag ${r}:${SHA} ${REG}/${r}:latest
+            docker push ${REG}/${r}:${SHA}
+            docker push ${REG}/${r}:latest
+          done
+        '''
+      }
+    }
+
+    stage('Helm Lint') {
+      steps {
+        sh "helm lint ${CHART_DIR}"
+      }
+    }
+
+    stage('Create/Update Secret (optional)') {
+      when { expression { return params.CREATE_SECRET } }
+      steps {
+        withCredentials([string(credentialsId: 'MONGO_URI', variable: 'MURI'),
+                         file(credentialsId: 'KUBE_CONFIG', variable: 'KUBECONF')]) {
+          sh '''
+            set -e
+            export KUBECONFIG="$KUBECONF"
+            kubectl get ns ${NAMESPACE} >/dev/null 2>&1 || kubectl create ns ${NAMESPACE}
+            kubectl create secret generic mern-secrets \
+              --from-literal=mongoUri="${MURI}" \
+              -n ${NAMESPACE} \
+              --dry-run=client -o yaml | kubectl apply -f -
+          '''
+        }
+      }
+    }
+
+    stage('Helm Deploy') {
+      steps {
+        withCredentials([file(credentialsId: 'KUBE_CONFIG', variable: 'KUBECONF')]) {
+          sh '''
+            set -e
+            export KUBECONFIG="$KUBECONF"
+            kubectl get ns ${NAMESPACE} >/dev/null 2>&1 || kubectl create ns ${NAMESPACE}
+
+            helm upgrade --install ${RELEASE_NAME} ${CHART_DIR} -n ${NAMESPACE} \
+              --set frontend.image.repository=${REG}/${FRONTEND_IMG} \
+              --set backend.image.repository=${REG}/${BACKEND_IMG} \
+              --set frontend.image.tag=${SHA} \
+              --set backend.image.tag=${SHA}
+          '''
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      sh 'docker image prune -f || true'
+      sh 'rm -f .reg || true'
+    }
+  }
+}

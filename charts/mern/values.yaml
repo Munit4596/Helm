@@ -1,0 +1,50 @@
+namespace: mern                # target namespace (create it first: kubectl create ns mern)
+imagePullSecrets: []           # e.g. [{ name: regcred }]
+
+frontend:
+  enabled: true
+  image:
+    repository: munitkumar/csfrontend
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  replicas: 2
+  resources:
+    requests: { cpu: "50m", memory: "128Mi" }
+    limits:   { cpu: "300m", memory: "256Mi" }
+  env:
+    API_BASE_URL: "http://{{ .Release.Name }}-be:3000"
+  service:
+    type: ClusterIP
+    port: 80
+
+backend:
+  enabled: true
+  image:
+    repository: munitkumar/csbackend
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  replicas: 2
+  resources:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits:   { cpu: "500m", memory: "512Mi" }
+  env:
+    NODE_ENV: "production"
+    PORT: "3000"
+  secretRefs:
+    mongo:
+      secretName: mern-secrets
+      key: mongoUri
+  service:
+    type: ClusterIP
+    port: 3000
+
+ingress:
+  enabled: false
+  className: nginx
+  host: ""       # set a DNS name to enable host-based routing
+
+httpRoute:
+  enabled: false
+  # host: your-domain.example.com
+  # extra fields your httproute.yaml expects...
+
